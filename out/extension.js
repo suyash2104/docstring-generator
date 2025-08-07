@@ -41,7 +41,9 @@ exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const fs = __importStar(require("fs"));
+const path = __importStar(require("path"));
 const config_json_1 = __importDefault(require("./config.json"));
+const hub_1 = require("@huggingface/hub");
 // Dynamic imports for ESM modules
 let getLlama = null;
 let LlamaChatSession = null;
@@ -49,6 +51,44 @@ let llamaModel = null;
 let chatSession = null;
 let isModelLoaded = false;
 let modelLoadingPromise = null;
+function isModelDownloaded(modelPath) {
+    return fs.existsSync(modelPath);
+}
+async function downloadModel(options) {
+    const { repo, filename, revision = "main", token, localDir = "./models" } = options;
+    try {
+        if (!fs.existsSync(localDir)) {
+            fs.mkdirSync(localDir, { recursive: true });
+            console.log(`Created directory: ${localDir}`);
+        }
+        if (filename) {
+            // Download a specific file
+            console.log(`Downloading ${filename} from ${repo}...`);
+            const response = await (0, hub_1.downloadFile)({
+                repo,
+                path: filename,
+                revision,
+                ...(token && { accessToken: token })
+            });
+            if (response) {
+                const buffer = Buffer.from(await response.arrayBuffer());
+                const localPath = path.join(localDir, filename);
+                const dir = path.dirname(localPath);
+                if (!fs.existsSync(dir)) {
+                    fs.mkdirSync(dir, { recursive: true });
+                }
+                fs.writeFileSync(localPath, buffer);
+                console.log(`Downloaded ${filename} to ${localPath}`);
+            }
+        }
+    }
+    catch (error) {
+        console.error(`Failed to download model from ${repo}:`, error);
+        throw new Error(`Model download failed: ${error}`);
+    }
+    console.log(`Model downloaded successfully to ${localDir}`);
+    vscode.window.showInformationMessage(`Model downloaded successfully to ${localDir}`);
+}
 async function loadNodeLlamaCpp() {
     try {
         console.log('Loading node-llama-cpp module...');
@@ -91,7 +131,38 @@ async function initializeModel() {
             if (!moduleLoaded) {
                 throw new Error('Failed to load node-llama-cpp module');
             }
-            const modelPath = config_json_1.default.modelPath;
+            const modelPath = path.join(__dirname, config_json_1.default.modelPath, config_json_1.default.modelName);
+            // if (!isModelDownloaded(modelPath)) {
+            //     vscode.window.showInformationMessage('Downloading AI model...');
+            //     await downloadModel({
+            //         repo: config.repo,
+            //         filename: config.filename,
+            //         localDir: config.modelPath,
+            //     });
+            //     console.log('Initializing Llama model...');
+            //     vscode.window.showInformationMessage('Model downloaded successfully.');
+            // }
+            if (!isModelDownloaded(modelPath)) {
+                try {
+                    // Show progress indicator
+                    await vscode.window.withProgress({
+                        location: vscode.ProgressLocation.Notification,
+                        title: 'Downloading AI model...',
+                        cancellable: false
+                    }, async (progress) => {
+                        await downloadModel({
+                            repo: config_json_1.default.repo,
+                            filename: config_json_1.default.filename,
+                            localDir: path.join(__dirname, config_json_1.default.modelPath),
+                        });
+                    });
+                    vscode.window.showInformationMessage('Model downloaded successfully.');
+                }
+                catch (error) {
+                    console.error('Error generating docstring:', error);
+                    vscode.window.showErrorMessage(`Failed to generate docstring: ${error.message || error}`);
+                }
+            }
             // Check if file exists
             if (!fs.existsSync(modelPath)) {
                 throw new Error(`Model file not found at: ${modelPath}`);

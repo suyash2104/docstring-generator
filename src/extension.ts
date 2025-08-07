@@ -2,10 +2,20 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import config from './config.json';
+import axios from 'axios';
+import { downloadFile, listFiles } from '@huggingface/hub';
 
 
 interface DocstringResponse {
     docstring: string;
+}
+
+interface DownloadOptions {
+  repo: string;
+  filename?: string;
+  revision?: string;
+  token?: string;
+  localDir?: string;
 }
 
 // Dynamic imports for ESM modules
@@ -15,6 +25,54 @@ let llamaModel: any = null;
 let chatSession: any = null;
 let isModelLoaded = false;
 let modelLoadingPromise: Promise<boolean> | null = null;
+
+function isModelDownloaded(modelPath: string): boolean {
+  return fs.existsSync(modelPath);
+}
+
+
+async function downloadModel(options: DownloadOptions): Promise<void> {
+  const { repo, filename, revision = "main", token, localDir = "./models" } = options;
+
+  try{
+        
+
+    if (!fs.existsSync(localDir)) {
+        fs.mkdirSync(localDir, { recursive: true });
+        console.log(`Created directory: ${localDir}`);
+        }
+
+    if (filename) {
+        // Download a specific file
+        console.log(`Downloading ${filename} from ${repo}...`);
+        
+        const response = await downloadFile({
+            repo,
+            path: filename,
+            revision,
+            ...(token && { accessToken: token })
+        });
+
+        if (response) {
+            const buffer = Buffer.from(await response.arrayBuffer());
+            const localPath = path.join(localDir, filename);
+
+            const dir = path.dirname(localPath);
+            if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+            }
+
+            fs.writeFileSync(localPath, buffer);
+            console.log(`Downloaded ${filename} to ${localPath}`);
+        }
+        }
+    } catch (error) {
+        console.error(`Failed to download model from ${repo}:`, error);
+        throw new Error(`Model download failed: ${error}`);
+    }
+  console.log(`Model downloaded successfully to ${localDir}`);
+  vscode.window.showInformationMessage(`Model downloaded successfully to ${localDir}`);
+}
 
 async function loadNodeLlamaCpp(): Promise<boolean> {
     try {
@@ -66,7 +124,42 @@ export async function initializeModel(): Promise<void> {
                 throw new Error('Failed to load node-llama-cpp module');
             }
             
-            const modelPath = config.modelPath
+            const modelPath = path.join( __dirname, config.modelPath, config.modelName);
+
+            // if (!isModelDownloaded(modelPath)) {
+            //     vscode.window.showInformationMessage('Downloading AI model...');
+            //     await downloadModel({
+            //         repo: config.repo,
+            //         filename: config.filename,
+            //         localDir: config.modelPath,
+            //     });
+            //     console.log('Initializing Llama model...');
+            //     vscode.window.showInformationMessage('Model downloaded successfully.');
+            // }
+            if (!isModelDownloaded(modelPath)) {
+                try {
+                    // Show progress indicator
+                    await vscode.window.withProgress({
+                        location: vscode.ProgressLocation.Notification,
+                        title: 'Downloading AI model...',
+                        cancellable: false
+                    }, async (progress) => {
+
+                            await downloadModel({
+                            repo: config.repo,
+                            filename: config.filename,
+                            localDir: path.join( __dirname, config.modelPath),
+                        });
+                        
+                    });
+
+                    vscode.window.showInformationMessage('Model downloaded successfully.');
+                    
+                } catch (error: any) {
+                    console.error('Error generating docstring:', error);
+                    vscode.window.showErrorMessage(`Failed to generate docstring: ${error.message || error}`);
+                }
+            }
             
             // Check if file exists
             if (!fs.existsSync(modelPath)) {
@@ -120,7 +213,7 @@ export async function initializeModel(): Promise<void> {
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Docstring Generator extension is now active!');
-    
+
     // Initialize model asynchronously without blocking activation
     setTimeout(async () => {
         try {
