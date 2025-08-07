@@ -1,0 +1,420 @@
+import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
+import config from './config.json';
+
+
+interface DocstringResponse {
+    docstring: string;
+}
+
+// Dynamic imports for ESM modules
+let getLlama: any = null;
+let LlamaChatSession: any = null;
+let llamaModel: any = null;
+let chatSession: any = null;
+let isModelLoaded = false;
+let modelLoadingPromise: Promise<boolean> | null = null;
+
+async function loadNodeLlamaCpp(): Promise<boolean> {
+    try {
+        console.log('Loading node-llama-cpp module...');
+        
+        // Use dynamic import with proper ESM handling
+        const nodeLlamaCpp = await eval('import("node-llama-cpp")');
+        
+        getLlama = nodeLlamaCpp.getLlama;
+        LlamaChatSession = nodeLlamaCpp.LlamaChatSession;
+        
+        console.log('node-llama-cpp module loaded successfully');
+        return true;
+    } catch (error) {
+        console.error('Failed to load node-llama-cpp:', error);
+        
+        // Try alternative import method
+        try {
+            console.log('Trying alternative import method...');
+            const importPath = 'node-llama-cpp';
+            const nodeLlamaCpp = await Function('return import("' + importPath + '")')();
+            
+            getLlama = nodeLlamaCpp.getLlama;
+            LlamaChatSession = nodeLlamaCpp.LlamaChatSession;
+            
+            console.log('node-llama-cpp module loaded successfully (alternative method)');
+            return true;
+        } catch (altError) {
+            console.error('Alternative import also failed:', altError);
+            return false;
+        }
+    }
+}
+
+export async function initializeModel(): Promise<void> {
+    // Prevent multiple initialization attempts
+    if (modelLoadingPromise) {
+        await modelLoadingPromise;
+        return;
+    }
+
+    modelLoadingPromise = (async () => {
+        try {
+            console.log('Initializing Llama model...');
+            
+            // First, load the ESM module
+            const moduleLoaded = await loadNodeLlamaCpp();
+            if (!moduleLoaded) {
+                throw new Error('Failed to load node-llama-cpp module');
+            }
+            
+            const modelPath = config.modelPath
+            
+            // Check if file exists
+            if (!fs.existsSync(modelPath)) {
+                throw new Error(`Model file not found at: ${modelPath}`);
+            }
+            
+            const stats = fs.statSync(modelPath);
+            console.log(`Model file size: ${(stats.size / 1024 / 1024 / 1024).toFixed(2)} GB`);
+            
+            // Get llama instance
+            console.log('Getting Llama instance...');
+            const llama = await getLlama();
+            console.log('Llama instance created successfully');
+            
+            // Load the model with more conservative settings
+            console.log('Loading model...');
+            llamaModel = await llama.loadModel({
+                modelPath: modelPath,
+                gpuLayers: config.gpuLayers, // Use CPU only for compatibility - parametrize this as needed
+                // Add more conservative settings
+                threads: Math.max(1, Math.floor(require('os').cpus().length / 2)),
+            });
+            console.log('Model loaded successfully');
+            
+            // Create context with smaller size initially
+            console.log('Creating context...');
+            const context = await llamaModel.createContext({
+                contextSize: config.contextSize, // Smaller context size for initial load - parameter
+            });
+            
+            // Create chat session
+            console.log('Creating chat session...');``
+            chatSession = new LlamaChatSession({
+                contextSequence: context.getSequence(),
+            });
+            
+            isModelLoaded = true;
+            console.log('Model initialization completed successfully!');
+            return true;
+            
+        } catch (error) {
+            console.error('Failed to initialize model:', error);
+            isModelLoaded = false;
+            modelLoadingPromise = null; // Reset so we can try again
+            throw new Error(`Model initialization failed: ${error}`);
+        }
+    })();
+
+    await modelLoadingPromise;
+}
+
+export function activate(context: vscode.ExtensionContext) {
+    console.log('Docstring Generator extension is now active!');
+    
+    // Initialize model asynchronously without blocking activation
+    setTimeout(async () => {
+        try {
+            await initializeModel();
+            vscode.window.showInformationMessage('Docstring Generator: Model loaded successfully!');
+        } catch (err: any) {
+            console.error('Model initialization failed:', err);
+            vscode.window.showErrorMessage(`Failed to initialize model: ${err.message || err}`);
+        }
+    }, 2000); // Slightly longer delay to ensure extension is fully activated
+
+    const disposable = vscode.commands.registerCommand('docstringGenerator.generateDocstring', async () => {
+        console.log('Generate docstring command triggered!');
+        
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showErrorMessage('No active editor found');
+            return;
+        }
+
+        // Check if model is loading
+        if (modelLoadingPromise && !isModelLoaded) {
+            vscode.window.showInformationMessage('Model is still loading... Please wait.');
+            try {
+                await modelLoadingPromise;
+            } catch (error: any) {
+                vscode.window.showErrorMessage(`Failed to load model: ${error.message || error}`);
+                return;
+            }
+        }
+
+        if (!isModelLoaded) {
+            // Try to initialize if not already loaded
+            try {
+                vscode.window.showInformationMessage('Initializing model... Please wait.');
+                await initializeModel();
+            } catch (error: any) {
+                vscode.window.showErrorMessage(`Failed to load model: ${error.message || error}`);
+                return;
+            }
+        }
+
+        const selection = editor.selection;
+        const position = selection.active;
+        
+        // Get the function code around the cursor
+        const functionCode = extractFunctionCode(editor.document, position);
+        console.log('functionCode', functionCode);
+        console.log('position', position);
+        if (!functionCode) {
+            vscode.window.showErrorMessage('No function found at cursor position');
+            return;
+        }
+
+        try {
+            // Show progress indicator
+            await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: "Generating docstring...",
+                cancellable: false
+            }, async (progress) => {
+                const docstring = await generateDocstring(functionCode.code);
+                await insertDocstring(editor, functionCode.insertPosition, docstring);
+            });
+
+            vscode.window.showInformationMessage('Docstring generated successfully!');
+        } catch (error: any) {
+            console.error('Error generating docstring:', error);
+            vscode.window.showErrorMessage(`Failed to generate docstring: ${error.message || error}`);
+        }
+    });
+
+    context.subscriptions.push(disposable);
+}
+
+interface FunctionInfo {
+    code: string;
+    insertPosition: vscode.Position;
+}
+
+function extractFunctionCode(document: vscode.TextDocument, position: vscode.Position): FunctionInfo | null {
+    const text = document.getText();
+    const lines = text.split('\n');
+    const currentLine = position.line;
+    
+    // Look for function definition starting from current line and going up/down
+    let functionStartLine = -1;
+    let functionEndLine = -1;
+    
+    // Search backwards for function definition
+    for (let i = currentLine; i >= 0; i--) {
+        const line = lines[i].trim();
+        if (line.match(/^(def|function|class|async\s+def)\s+\w+/)) {
+            functionStartLine = i;
+            break;
+        }
+    }
+    
+    if (functionStartLine === -1) {
+        // Search forwards for function definition
+        for (let i = currentLine; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (line.match(/^(def|function|class|async\s+def)\s+\w+/)) {
+                functionStartLine = i;
+                break;
+            }
+        }
+    }
+    
+    if (functionStartLine === -1) {
+        return null;
+    }
+    
+    // Find the end of the function by looking for the next function or end of indentation
+    const functionIndentation = lines[functionStartLine].search(/\S/);
+    functionEndLine = functionStartLine;
+    
+    for (let i = functionStartLine + 1; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.trim() === '') {
+            continue; // Skip empty lines
+        }
+        
+        const currentIndentation = line.search(/\S/);
+        if (currentIndentation <= functionIndentation && line.trim() !== '') {
+            break;
+        }
+        functionEndLine = i;
+    }
+    
+    // Extract function code
+    const functionLines = lines.slice(functionStartLine, functionEndLine + 1);
+    const functionCode = functionLines.join('\n');
+    
+    // Determine where to insert the docstring (after function definition line)
+    let insertLine = functionStartLine + 1;
+    
+    // Skip any existing docstring or comments
+    // while (insertLine < functionEndLine && 
+    //        (lines[insertLine].trim().startsWith('"""') || 
+    //         lines[insertLine].trim().startsWith("'''") ||
+    //         lines[insertLine].trim().startsWith('#') ||
+    //         lines[insertLine].trim() === '')) {
+    //     insertLine++;
+    // 
+    // }
+    
+    return {
+        code: functionCode,
+        insertPosition: new vscode.Position(insertLine, 0)
+    };
+}
+
+async function generateDocstring(functionCode: string): Promise<string> {
+
+    const context = await llamaModel.createContext({
+                contextSize: config.contextSize, // Smaller context size for initial load - parameter
+            });
+
+    chatSession = new LlamaChatSession({
+                contextSequence: context.getSequence(),
+            });
+
+    if (!isModelLoaded || !chatSession) {
+        throw new Error("Model not initialized or chat session not available");
+    }
+
+    const prompt = `You are an AI that generates ONLY Python-style docstrings. 
+Given Python function, output its docstring following these strict instructions:
+- Exactly one-line summary.
+- List all parameters with their types.
+- List the return type.
+- Do NOT include any code blocks, extra explanation, or text before or after the docstring.
+- Give docstring inside the triple quotes.
+
+Example:
+
+def add(a: int, b: int) -> int:
+    return a + b
+
+Docstring:
+"""
+Adds two integers.
+
+Args:
+    a (int): First integer.
+    b (int): Second integer.
+
+Returns:
+    int: The sum of a and b.
+"""
+
+Now, generate a docstring for following function:
+
+${functionCode}
+
+Docstring:
+`;
+
+    try {
+        console.log('Generating docstring with prompt...', prompt);
+        
+        const response = await chatSession.prompt(prompt, {
+            maxTokens: config.maxTokens,
+            temperature: config.temperature,
+            topP: config.topP,
+            stop: config.stopSequences,
+            repeatPenalty: config.repeatPenalty,
+        });
+        
+        
+        console.log('Raw model response:', response);
+        
+        // Clean up the response
+        let docstring = response.trim();
+        
+        // Remove any unwanted prefixes or suffixes
+        docstring = docstring.replace(/^(Docstring:|```|```python)/i, '').trim();
+        docstring = docstring.replace(/(```|```)$/i, '').trim();
+        const match = docstring.match(/"""([\s\S]*?)"""/);
+        docstring = match ? match[1].trim() : "";
+        
+        if (!docstring) {
+            throw new Error('Model returned empty response');
+        }
+        
+        console.log('Cleaned docstring:', docstring);
+        return docstring;
+        
+    } catch (error: any) {
+        console.error('Error in generateDocstring:', error);
+        throw new Error(`Failed to generate docstring: ${error.message || error}`);
+    }
+}
+
+async function insertDocstring(editor: vscode.TextEditor, position: vscode.Position, docstring: string) {
+    const indentation = getIndentation(editor.document, position.line);
+    
+    // Format the docstring with proper indentation
+    const formattedDocstring = formatDocstring(docstring, indentation);
+    
+    await editor.edit(editBuilder => {
+        editBuilder.insert(position, formattedDocstring + '\n');
+    });
+}
+
+function getIndentation(document: vscode.TextDocument, line: number): string {
+    // Look for the previous non-empty line to get indentation
+    for (let i = line - 1; i >= 0; i--) {
+        const lineText = document.lineAt(i).text;
+        if (lineText.trim() !== '') {
+            const match = lineText.match(/^(\s*)/);
+            return match ? match[1] + '    ' : '    '; // Add extra indentation for docstring
+        }
+    }
+    return '    ';
+}
+
+function formatDocstring(docstring: string, indentation: string): string {
+    // Clean up the docstring and format it properly
+    let cleaned = docstring.trim();
+    
+    // Remove any existing triple quotes
+    cleaned = cleaned.replace(/^["']{3}|["']{3}$/g, '');
+    
+    // Split into lines and add proper indentation
+    const lines = cleaned.split('\n');
+    const formattedLines = lines.map((line, index) => {
+        if (index === 0) {
+            return `\n${indentation}"""${line}`;
+        } else if (index === lines.length - 1) {
+            return `${indentation}${line}"""\n`;
+        } else {
+            return `${indentation}${line}`;
+        }
+    });
+    
+    // If it's a single line, format differently
+    if (lines.length === 1) {
+        return `${indentation}"""${cleaned}"""`;
+    }
+    
+    return formattedLines.join('\n');
+}
+
+export function deactivate() {
+    // Clean up resources
+    if (chatSession) {
+        chatSession = null;
+    }
+    if (llamaModel) {
+        llamaModel = null;
+    }
+    isModelLoaded = false;
+    modelLoadingPromise = null;
+    console.log('Extension deactivated and resources cleaned up');
+}
