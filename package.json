@@ -1,0 +1,73 @@
+{
+  "name": "python-docstring-generator",
+  "displayName": "Local AI Docstring Generator",
+  "description": "Generate docstrings for Python functions locally using AI.",
+  "version": "1.0.2",
+  "publisher": "ssingh927",
+  "icon": "icon.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/suyash2104/docstring-generator.git"
+  },
+  "engines": {
+    "vscode": "^1.102.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "*"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "docstringGenerator.generateDocstring",
+        "title": "Generate Docstring"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "docstringGenerator.generateDocstring",
+          "when": "editorTextFocus && resourceExtname == .py",
+          "group": "1_modification"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "docstringGenerator.generateDocstring",
+          "when": "editorLangId == python"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "docstringGenerator.generateDocstring",
+        "key": "ctrl+shift+d",
+        "mac": "cmd+shift+d",
+        "when": "editorTextFocus && editorLangId == python"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "copy-deps": "node copy-dependencies.js",
+    "build": "npm run compile && npm run copy-deps",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "@huggingface/hub": "^2.4.1",
+    "lifecycle-utils": "^3.0.1",
+    "node-llama-cpp": "^3.12.1"
+  },
+  "devDependencies": {
+    "@types/node": "^16.18.126",
+    "@types/vscode": "^1.96.0",
+    "@vscode/vsce": "^2.19.0",
+    "typescript": "^5.9.2"
+  }
+}
